@@ -1272,15 +1272,7 @@ pub const Surface = extern struct {
             // This can trigger an input method so we need to notify the im context
             // where the cursor is so it can render the dropdowns in the correct
             // place.
-            if (priv.core_surface) |surface| {
-                const ime_point = surface.imePoint();
-                priv.im_context.as(gtk.IMContext).setCursorLocation(&.{
-                    .f_x = @intFromFloat(ime_point.x),
-                    .f_y = @intFromFloat(ime_point.y),
-                    .f_width = 1,
-                    .f_height = 1,
-                });
-            }
+            self.updateImePosition();
 
             // We note that we're in a keypress because we want some logic to
             // depend on this. For example, we don't want to send character events
@@ -2801,7 +2793,10 @@ pub const Surface = extern struct {
         priv.focused = focused;
 
         const ctx = priv.im_context.as(gtk.IMContext);
-        if (focused) ctx.focusIn() else ctx.focusOut();
+        if (focused) {
+            self.updateImePosition();
+            ctx.focusIn();
+        } else ctx.focusOut();
 
         _ = glib.idleAddOnce(idleFocus, self.ref());
         self.as(gobject.Object).notifyByPspec(properties.focused.impl.param_spec);
@@ -3143,6 +3138,35 @@ pub const Surface = extern struct {
         return @intFromBool(glib.SOURCE_REMOVE);
     }
 
+    /// Tell the input method where the cursor currently is, so that
+    /// candidate windows can be placed correctly.
+    ///
+    /// This must be called from the preedit callbacks and not only from
+    /// key events: under Wayland input-method frontends (text-input-v3),
+    /// keys handled by the input method are consumed by the compositor
+    /// and never delivered to us as key events, so during composition
+    /// key events alone would leave the reported location stale, or
+    /// never set at all (a 0x0 rectangle at the surface origin).
+    ///
+    /// The reported rectangle is a caret rectangle at the horizontal
+    /// center of the cursor cell, spanning the cell's full height.
+    /// The full height matters: compositors place the candidate window
+    /// below the rectangle and flip it to above the rectangle when
+    /// there is no space below, so a degenerate rectangle at the cell's
+    /// bottom edge makes the flipped window cover the line being
+    /// edited.
+    fn updateImePosition(self: *Self) void {
+        const priv = self.private();
+        const surface = priv.core_surface orelse return;
+        const ime_point = surface.imePoint();
+        priv.im_context.as(gtk.IMContext).setCursorLocation(&.{
+            .f_x = @intFromFloat(ime_point.x),
+            .f_y = @intFromFloat(ime_point.y - ime_point.height),
+            .f_width = 1,
+            .f_height = @intFromFloat(ime_point.height),
+        });
+    }
+
     fn imPreeditStart(
         _: *gtk.IMMulticontext,
         self: *Self,
@@ -3154,6 +3178,8 @@ pub const Surface = extern struct {
         const priv = self.private();
         priv.im_composing = true;
         priv.im_len = 0;
+
+        self.updateImePosition();
     }
 
     fn imPreeditChanged(
@@ -3193,6 +3219,8 @@ pub const Surface = extern struct {
                 .{err},
             );
         };
+
+        self.updateImePosition();
     }
 
     fn imPreeditEnd(
